@@ -26,3 +26,5 @@ git -c http.extraHeader="Authorization: Bearer $ARTIFACTS_TOKEN" \
 curl "$WORKER_URL/repos/info?name=$REPO_NAME"
 curl "$WORKER_URL/repos/token?name=$REPO_NAME&scope=read&ttl=3600"
 ```
+
+`/repos/info` and `/repos/token` may return `202` immediately after `create` while the repo finishes becoming ready.
