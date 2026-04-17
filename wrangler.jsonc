@@ -1,0 +1,15 @@
+{
+  "name": "artifacts-starter",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-15",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "default",
+    },
+  ],
+}
