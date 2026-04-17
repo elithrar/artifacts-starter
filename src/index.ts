@@ -1,57 +1,15 @@
-import type { Service } from "cloudflare:workers";
+import { rateLimit, type RateLimitKeyFunc } from "@elithrar/workers-hono-rate-limit";
+import { Hono, type MiddlewareHandler } from "hono";
 
-interface ArtifactsRepoInfo {
-  defaultBranch: string;
-  remote: string;
-}
+type Bindings = Pick<Env, "ARTIFACTS" | "CREATE_RATE_LIMITER">;
 
-interface ArtifactsCreateRepoResult {
-  name: string;
-  remote: string;
-  token: string;
-  expiresAt: string;
-  defaultBranch: string;
-}
+const getCreateRateLimitKey: RateLimitKeyFunc = (c) => {
+  return c.req.path;
+};
 
-interface ArtifactsCreateTokenResult {
-  plaintext: string;
-}
-
-interface ArtifactsRepo {
-  info(): Promise<ArtifactsRepoInfo | null>;
-  createToken(
-    scope?: "read" | "write",
-    ttl?: number,
-  ): Promise<ArtifactsCreateTokenResult>;
-}
-
-type ArtifactsGetRepoResult =
-  | ArtifactsRepo
-  | { status: "ready"; repo: ArtifactsRepo }
-  | { status: "not_found" }
-  | { status: "importing"; retryAfter: number }
-  | { status: "forking"; retryAfter: number }
-  | null;
-
-interface Artifacts {
-  create(
-    name: string,
-    opts?: {
-      description?: string;
-      readOnly?: boolean;
-      setDefaultBranch?: string;
-    },
-  ): Promise<ArtifactsCreateRepoResult & { repo: ArtifactsRepo }>;
-  get(name: string): Promise<ArtifactsGetRepoResult>;
-}
-
-interface Env {
-  ARTIFACTS: Service<Artifacts>;
-}
-
-function json(data: unknown, init?: ResponseInit) {
-  return Response.json(data, init);
-}
+const limitCreateRoute: MiddlewareHandler<{ Bindings: Bindings }> = (c, next) => {
+  return rateLimit(c.env.CREATE_RATE_LIMITER, getCreateRateLimitKey)(c, next);
+};
 
 function isRepoHandle(value: ArtifactsGetRepoResult): value is ArtifactsRepo {
   return !!value && typeof value === "object" && "info" in value;
@@ -86,87 +44,91 @@ function getRepoHandle(
   };
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const name = url.searchParams.get("name") ?? "starter-repo";
+const app = new Hono<{ Bindings: Bindings }>();
 
-    if (url.pathname === "/") {
-      return json({
-        ok: true,
-        routes: {
-          create: "/repos/create?name=starter-repo",
-          info: "/repos/info?name=starter-repo",
-          token: "/repos/token?name=starter-repo&scope=read&ttl=3600",
-        },
-      });
-    }
+app.get("/", (c) => {
+  return c.json({
+    ok: true,
+    routes: {
+      create: "/repos/create?name=starter-repo",
+      info: "/repos/info?name=starter-repo",
+      token: "/repos/token?name=starter-repo&scope=read&ttl=3600",
+    },
+  });
+});
 
-    if (url.pathname === "/repos/create") {
-      try {
-        const created = await env.ARTIFACTS.create(name, {
-          description: "Repository for automation experiments",
-          readOnly: false,
-          setDefaultBranch: "main",
-        });
-        return json({
-          name: created.name,
-          remote: created.remote,
-          token: created.token,
-          expiresAt: created.expiresAt,
-          defaultBranch: created.defaultBranch,
-        });
-      } catch {
-        return new Response("duplicate", { status: 409 });
-      }
-    }
+app.get("/repos/create", limitCreateRoute, async (c) => {
+  const name = c.req.query("name") ?? "starter-repo";
 
-    if (url.pathname === "/repos/info") {
-      const repoState = getRepoHandle(await env.ARTIFACTS.get(name));
+  try {
+    const created = await c.env.ARTIFACTS.create(name, {
+      description: "Repository for automation experiments",
+      readOnly: false,
+      setDefaultBranch: "main",
+    });
 
-      if (repoState.kind === "not_found") {
-        return json({ name, status: "not_found" }, { status: 404 });
-      }
+    return c.json({
+      name: created.name,
+      remote: created.remote,
+      token: created.token,
+      expiresAt: created.expiresAt,
+      defaultBranch: created.defaultBranch,
+    });
+  } catch {
+    return c.json({ error: "duplicate" }, 409);
+  }
+});
 
-      if (repoState.kind === "pending") {
-        return json(
-          {
-            name,
-            status: repoState.status,
-            retryAfter: repoState.retryAfter,
-          },
-          { status: 202 },
-        );
-      }
+app.get("/repos/info", async (c) => {
+  const name = c.req.query("name") ?? "starter-repo";
+  const repoState = getRepoHandle(await c.env.ARTIFACTS.get(name));
 
-      const info = await repoState.repo.info();
-      return json({ status: "ready", info });
-    }
+  if (repoState.kind === "not_found") {
+    return c.json({ name, status: "not_found" }, 404);
+  }
 
-    if (url.pathname === "/repos/token") {
-      const repoState = getRepoHandle(await env.ARTIFACTS.get(name));
-      const scope = url.searchParams.get("scope") === "read" ? "read" : "write";
-      const ttl = Number(url.searchParams.get("ttl") ?? "3600");
+  if (repoState.kind === "pending") {
+    return c.json(
+      {
+        name,
+        status: repoState.status,
+        retryAfter: repoState.retryAfter,
+      },
+      202,
+    );
+  }
 
-      if (repoState.kind === "not_found") {
-        return json({ name, status: "not_found" }, { status: 404 });
-      }
+  const info = await repoState.repo.info();
+  return c.json({ status: "ready", info });
+});
 
-      if (repoState.kind === "pending") {
-        return json(
-          {
-            name,
-            status: repoState.status,
-            retryAfter: repoState.retryAfter,
-          },
-          { status: 202 },
-        );
-      }
+app.get("/repos/token", async (c) => {
+  const name = c.req.query("name") ?? "starter-repo";
+  const repoState = getRepoHandle(await c.env.ARTIFACTS.get(name));
+  const scope = c.req.query("scope") === "read" ? "read" : "write";
+  const ttl = Number(c.req.query("ttl") ?? "3600");
 
-      const token = await repoState.repo.createToken(scope, ttl);
-      return json(token);
-    }
+  if (repoState.kind === "not_found") {
+    return c.json({ name, status: "not_found" }, 404);
+  }
 
-    return json({ error: "Not found" }, { status: 404 });
-  },
-} satisfies ExportedHandler<Env>;
+  if (repoState.kind === "pending") {
+    return c.json(
+      {
+        name,
+        status: repoState.status,
+        retryAfter: repoState.retryAfter,
+      },
+      202,
+    );
+  }
+
+  const token = await repoState.repo.createToken(scope, ttl);
+  return c.json(token);
+});
+
+app.notFound((c) => {
+  return c.json({ error: "Not found" }, 404);
+});
+
+export default app;

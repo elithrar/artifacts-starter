@@ -12,4 +12,14 @@
       "namespace": "default",
     },
   ],
+  "ratelimits": [
+    {
+      "name": "CREATE_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 25,
+        "period": 10,
+      },
+    },
+  ],
 }
